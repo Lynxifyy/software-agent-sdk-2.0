@@ -42,6 +42,9 @@ class LLMResponse(BaseModel):
     message: Message
     metrics: MetricsSnapshot
     raw_response: ModelResponse | ResponsesAPIResponse
+    # Set by the LLM layer when the provider stopped the reply at the output
+    # token limit; a truncated reply is not a final answer (see ``truncated``).
+    truncated: bool = False
 
     model_config: ClassVar[ConfigDict] = ConfigDict(arbitrary_types_allowed=True)
 
@@ -57,3 +60,18 @@ class LLMResponse(BaseModel):
             The response ID from the LLM response
         """
         return self.raw_response.id
+
+    @staticmethod
+    def is_truncated_response(resp: ModelResponse | ResponsesAPIResponse) -> bool:
+        """Whether the provider stopped ``resp`` at the output token limit.
+
+        A reply cut off mid-tool-call otherwise looks like an ordinary message
+        (or a JSON parse error on a half-written argument); callers use this to
+        retry instead of finishing the run.
+        """
+        if isinstance(resp, ModelResponse):
+            return bool(resp.choices) and resp.choices[0].finish_reason == "length"
+        if isinstance(resp, ResponsesAPIResponse):
+            return resp.status == "incomplete" and resp.incomplete_details is not None
+        # Tolerate stand-ins (e.g. spec'd mocks) that model neither shape.
+        return False

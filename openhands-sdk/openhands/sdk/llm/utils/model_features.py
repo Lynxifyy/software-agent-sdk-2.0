@@ -297,6 +297,10 @@ FORCE_STRING_SERIALIZER_MODELS: list[str] = [
 
 # Models that we should send full reasoning content
 # in the message input
+# NOTE: model_matches uses case-insensitive substring matching, so the bare
+# "deepseek-v4" family token also covers "openhands/deepseek-v4-flash" and
+# "openai/deepseek-v4-flash" (custom base URLs), which the fully-qualified
+# "deepseek/deepseek-v4-flash" entry alone would miss.
 SEND_REASONING_CONTENT_MODELS: list[str] = [
     "kimi-k3",
     "kimi-k2-thinking",
@@ -304,9 +308,7 @@ SEND_REASONING_CONTENT_MODELS: list[str] = [
     "kimi-k2.6",
     "openrouter/minimax-m2",  # MiniMax-M2 via OpenRouter (interleaved thinking)
     "deepseek/deepseek-reasoner",
-    "deepseek/deepseek-v4-pro",  # Dual-mode (Thinking/Non-Thinking)
-    "deepseek/deepseek-v4-flash",  # Dual-mode (Thinking/Non-Thinking)
-    "deepseek/deepseek-v4.1-flash",  # Dual-mode (Thinking/Non-Thinking)
+    "deepseek-v4",  # DeepSeek V4/V4.1 dual-mode (Thinking/Non-Thinking)
 ]
 
 # Match token -> canonical LiteLLM ID for vision metadata overrides.
