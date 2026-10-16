@@ -15,6 +15,7 @@ from openhands.sdk.agent.stream_context import StreamContext
 from openhands.sdk.conversation.state import ConversationExecutionStatus
 from openhands.sdk.event import MessageEvent
 from openhands.sdk.llm import LLMResponse, Message, TextContent
+from openhands.sdk.llm.utils.dsml import reconcile_dsml_message
 from openhands.sdk.logger import get_logger
 
 
@@ -267,7 +268,29 @@ class ResponseDispatchMixin:
         *,
         mask_secrets: bool = True,
     ) -> None:
-        """Handle LLM response with text content — finishes conversation."""
+        """Handle LLM response with text content — finishes conversation.
+
+        A reply whose "text" is DeepSeek DSML tool-call markup is reclassified
+        here: the markup is parsed into real tool calls and the run continues,
+        instead of ending with raw markup as the final message.
+        """
+        message, unparsed_dsml = reconcile_dsml_message(message)
+        if message.tool_calls:
+            self._handle_tool_calls(
+                message, llm_response, conversation, state, on_event, stream
+            )
+            return
+        if unparsed_dsml:
+            self._handle_dsml_failure(
+                message,
+                llm_response,
+                conversation,
+                on_event,
+                stream,
+                mask_secrets=mask_secrets,
+            )
+            return
+
         self._emit_message_event(
             message,
             llm_response,
@@ -279,6 +302,115 @@ class ResponseDispatchMixin:
         self._maybe_emit_vllm_tokens(llm_response, on_event)
         logger.debug("LLM produced a message response - awaits user input")
         state.execution_status = ConversationExecutionStatus.FINISHED
+
+    async def _ahandle_content_response(
+        self,
+        message: Message,
+        llm_response: LLMResponse,
+        conversation: LocalConversation,
+        state: ConversationState,
+        on_event: ConversationCallbackType,
+        stream: StreamContext | None = None,
+        *,
+        mask_secrets: bool = True,
+    ) -> None:
+        """Async variant of :meth:`_handle_content_response`."""
+        message, unparsed_dsml = reconcile_dsml_message(message)
+        if message.tool_calls:
+            await self._ahandle_tool_calls(
+                message, llm_response, conversation, state, on_event, stream
+            )
+            return
+        if unparsed_dsml:
+            self._handle_dsml_failure(
+                message,
+                llm_response,
+                conversation,
+                on_event,
+                stream,
+                mask_secrets=mask_secrets,
+            )
+            return
+
+        self._emit_message_event(
+            message,
+            llm_response,
+            conversation,
+            on_event,
+            stream,
+            mask_secrets=mask_secrets,
+        )
+        self._maybe_emit_vllm_tokens(llm_response, on_event)
+        logger.debug("LLM produced a message response - awaits user input")
+        state.execution_status = ConversationExecutionStatus.FINISHED
+
+    def _handle_dsml_failure(
+        self,
+        message: Message,
+        llm_response: LLMResponse,
+        conversation: LocalConversation,
+        on_event: ConversationCallbackType,
+        stream: StreamContext | None = None,
+        *,
+        mask_secrets: bool = True,
+    ) -> None:
+        """Emit the reply and nudge the model after unparseable DSML markup."""
+        self._emit_message_event(
+            message,
+            llm_response,
+            conversation,
+            on_event,
+            stream,
+            mask_secrets=mask_secrets,
+        )
+        self._maybe_emit_vllm_tokens(llm_response, on_event)
+        self._send_corrective_nudge(
+            on_event,
+            text=(
+                "Your last response used DSML tool-call markup that could not "
+                "be parsed into a function call. Please call the tool again "
+                "using a proper function call."
+            ),
+        )
+
+    def _handle_truncated_response(
+        self,
+        message: Message,
+        llm_response: LLMResponse,
+        conversation: LocalConversation,
+        state: ConversationState,  # noqa: ARG002
+        on_event: ConversationCallbackType,
+        stream: StreamContext | None = None,
+        *,
+        mask_secrets: bool = True,
+    ) -> None:
+        """Handle a reply cut off by the output token limit.
+
+        Treating a length-truncated reply as final silently ends the run with a
+        half-written answer; instead the partial reply is emitted and the model
+        is nudged to continue.
+        """
+        logger.warning(
+            "LLM response was truncated at the output token limit - "
+            "requesting continuation"
+        )
+        self._emit_message_event(
+            message,
+            llm_response,
+            conversation,
+            on_event,
+            stream,
+            mask_secrets=mask_secrets,
+        )
+        self._maybe_emit_vllm_tokens(llm_response, on_event)
+        self._send_corrective_nudge(
+            on_event,
+            text=(
+                "Your last response was cut off because it exceeded the output "
+                "token limit. Continue from where you stopped, or break the "
+                "task into smaller steps."
+            ),
+        )
 
     def _handle_no_content_response(
         self,
@@ -372,11 +504,17 @@ class ResponseDispatchMixin:
             }
         )
 
-    def _send_corrective_nudge(self, on_event: ConversationCallbackType) -> None:
+    def _send_corrective_nudge(
+        self,
+        on_event: ConversationCallbackType,
+        text: str | None = None,
+    ) -> None:
         """Inject corrective feedback when no tool call and no content.
 
         The model still receives this as a user-role message, but the event
         source marks that it came from the framework rather than the human.
+        ``text`` overrides the default message for specific failure modes
+        (unparseable DSML markup, output-limit truncation).
         """
         logger.warning(
             "LLM response contained no tool call and no content"
@@ -388,7 +526,8 @@ class ResponseDispatchMixin:
                 role="user",
                 content=[
                     TextContent(
-                        text=(
+                        text=text
+                        or (
                             "Your last response did not include a "
                             "function call or a message. Please "
                             "use a tool to proceed with the task."

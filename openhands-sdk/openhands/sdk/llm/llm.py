@@ -1230,6 +1230,7 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
             message=message,
             metrics=self.metrics.get_snapshot(),
             raw_response=resp,
+            truncated=LLMResponse.is_truncated_response(resp),
         )
 
     def _build_responses_result(self, resp: ResponsesAPIResponse) -> LLMResponse:
@@ -1239,6 +1240,7 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
             message=message,
             metrics=self.metrics.get_snapshot(),
             raw_response=resp,
+            truncated=LLMResponse.is_truncated_response(resp),
         )
 
     def _build_responses_call_kwargs(

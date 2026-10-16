@@ -112,15 +112,19 @@ class SubprocessTerminal(TerminalInterface):
 
         # Resolve shell path with precedence:
         # 1. Explicit shell_path argument
-        # 2. Auto-detection via shutil.which("bash") (searches PATH like `env bash`)
-        resolved_shell_path: str | None
-        if self.shell_path:
-            resolved_shell_path = self.shell_path
-        else:
-            resolved_shell_path = shutil.which("bash")
+        # 2. OPENHANDS_SHELL_PATH env var (lets a launcher point at a shell
+        #    that is not on PATH, e.g. Termux on Android where bash ships in a
+        #    non-standard prefix)
+        # 3. Auto-detection via shutil.which("bash"), then "sh" as a last
+        #    resort so a minimal Unix host without bash still gets a terminal
+        resolved_shell_path: str | None = self.shell_path or os.environ.get(
+            "OPENHANDS_SHELL_PATH"
+        )
+        if not resolved_shell_path:
+            resolved_shell_path = shutil.which("bash") or shutil.which("sh")
             if resolved_shell_path is None:
                 raise RuntimeError(
-                    "Could not find bash in PATH. "
+                    "Could not find bash (or sh) in PATH. "
                     "Please provide an explicit shell_path parameter "
                     "when creating the terminal."
                 )
@@ -190,9 +194,12 @@ class SubprocessTerminal(TerminalInterface):
         self.reader_thread.start()
         self._initialized: bool = True
 
-        # Configure bash: disable history expansion, set up PS1/PS2 prompts
+        # Configure the shell: disable history expansion (bash only; ignored
+        # elsewhere), set up PS1/PS2 prompts. `set +H` is a no-op on sh via the
+        # fallback shell, so guard it rather than let it print an error.
         init_cmd = (
-            f'set +H; export PROMPT_COMMAND=\'export PS1="{self.PS1}"\'; export PS2=""'
+            f'set +H 2>/dev/null; '
+            f'export PROMPT_COMMAND=\'export PS1="{self.PS1}"\'; export PS2=""'
         ).encode("utf-8", "ignore")
 
         self._write_pty(init_cmd + ENTER)

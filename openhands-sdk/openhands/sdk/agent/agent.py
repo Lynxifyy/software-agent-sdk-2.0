@@ -875,6 +875,15 @@ class Agent(CriticMixin, ResponseDispatchMixin, AgentBase):
         message: Message = llm_response.message
         response_type = classify_response(message)
 
+        # A reply cut off at the output token limit is not a final answer: a
+        # half-written tool call surfaces as a JSON parse error, and a truncated
+        # message ends the run prematurely. Retry by asking the model to continue.
+        if llm_response.truncated and response_type is not LLMResponseType.TOOL_CALLS:
+            self._handle_truncated_response(
+                message, llm_response, conversation, state, on_event, stream
+            )
+            return
+
         match response_type:
             case LLMResponseType.TOOL_CALLS:
                 self._handle_tool_calls(
@@ -1101,13 +1110,26 @@ class Agent(CriticMixin, ResponseDispatchMixin, AgentBase):
                 if sources == state.secret_registry.secret_sources:
                     break
 
+        # Mirror step(): a length-truncated reply is not a final answer.
+        if llm_response.truncated and response_type is not LLMResponseType.TOOL_CALLS:
+            self._handle_truncated_response(
+                message,
+                llm_response,
+                conversation,
+                state,
+                on_event,
+                stream,
+                mask_secrets=False,
+            )
+            return
+
         match response_type:
             case LLMResponseType.TOOL_CALLS:
                 await self._ahandle_tool_calls(
                     message, llm_response, conversation, state, on_event, stream
                 )
             case LLMResponseType.CONTENT:
-                self._handle_content_response(
+                await self._ahandle_content_response(
                     message,
                     llm_response,
                     conversation,

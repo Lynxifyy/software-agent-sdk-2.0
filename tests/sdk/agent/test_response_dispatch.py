@@ -4,7 +4,9 @@ from collections.abc import Callable
 from unittest.mock import MagicMock
 
 import pytest
-from litellm.types.utils import ModelResponse
+from litellm.types.utils import (
+    ModelResponse,
+)
 
 from openhands.sdk.agent import Agent
 from openhands.sdk.agent.response_dispatch import LLMResponseType, classify_response
@@ -23,7 +25,39 @@ from openhands.sdk.llm import (
     ThinkingBlock,
 )
 from openhands.sdk.llm.utils.metrics import MetricsSnapshot, TokenUsage
-from openhands.sdk.tool import Action, Observation
+from openhands.sdk.tool import Action, Observation, Tool, ToolExecutor, register_tool
+from openhands.sdk.tool.tool import ToolDefinition
+
+
+class _ReadAction(Action):
+    path: str
+
+
+class _ReadObservation(Observation):
+    path: str
+
+
+class _ReadExecutor(ToolExecutor[_ReadAction, _ReadObservation]):
+    def __call__(self, action: _ReadAction, conversation=None) -> _ReadObservation:
+        return _ReadObservation(path=action.path)
+
+
+class _ReadTool(ToolDefinition[_ReadAction, _ReadObservation]):
+    name = "read_file"
+
+    @classmethod
+    def create(cls, conv_state=None):
+        return [
+            cls(
+                description="Read a file",
+                action_type=_ReadAction,
+                observation_type=_ReadObservation,
+                executor=_ReadExecutor(),
+            )
+        ]
+
+
+register_tool("ReadTool", _ReadTool)
 
 
 class _LoopAction(Action):
@@ -203,6 +237,7 @@ def _run_single_step(
     record_emitted_events_in_state: bool = False,
     secrets: dict[str, str] | None = None,
     prepare: Callable[[LocalConversation], None] | None = None,
+    tools: list[str] | None = None,
 ) -> tuple[list[Event], LocalConversation]:
     """Run one agent step with a canned LLM response."""
     from pydantic import PrivateAttr
@@ -220,7 +255,7 @@ def _run_single_step(
             return self._response
 
     llm = SingleShotLLM(llm_response)
-    agent = Agent(llm=llm, tools=[])
+    agent = Agent(llm=llm, tools=[Tool(name=n) for n in (tools or [])])
     conversation = Conversation(agent=agent)
     conversation._ensure_agent_ready()
     if secrets is not None:
@@ -503,3 +538,130 @@ def test_content_response_masks_value_dropped_from_secret_sources():
 
     assert not convo.state.secret_registry.secret_sources
     assert _agent_message_text(events) == "the value is <secret-hidden> now"
+
+
+# ---------------------------------------------------------------------------
+# DeepSeek DSML tool-call markup
+# ---------------------------------------------------------------------------
+
+
+_DSML = "\uff5cDSML\uff5c"
+
+
+def _dsml_block(name: str, param: str, value: str) -> str:
+    return (
+        f"<{_DSML}tool_calls>\n"
+        f'<{_DSML}invoke name="{name}">\n'
+        f'<{_DSML}parameter name="{param}" string="true">{value}'
+        f"</{_DSML}parameter>\n"
+        f"</{_DSML}invoke>\n"
+        f"</{_DSML}tool_calls>"
+    )
+
+
+def test_dsml_markup_is_parsed_into_a_tool_call():
+    """A reply whose text is DSML markup runs the tool instead of finishing.
+
+    Without recovery the run ends and the raw markup becomes the final message.
+    """
+    msg = Message(
+        role="assistant",
+        content=[
+            TextContent(
+                text="I will read it. " + _dsml_block("read_file", "path", "README.md")
+            )
+        ],
+    )
+    events, convo = _run_single_step(_make_llm_response(msg), tools=["ReadTool"])
+    action_events = [e for e in events if isinstance(e, ActionEvent)]
+
+    assert convo.state.execution_status != ConversationExecutionStatus.FINISHED
+    assert len(action_events) == 1
+    assert action_events[0].tool_name == "read_file"
+    action = action_events[0].action
+    assert isinstance(action, _ReadAction)
+    assert action.path == "README.md"
+
+
+def test_dsml_markup_never_reaches_the_user_as_the_final_message():
+    """Raw DSML is stripped from the emitted message even on recovery."""
+    msg = Message(
+        role="assistant",
+        content=[TextContent(text=_dsml_block("read_file", "path", "a.py"))],
+    )
+    events, _ = _run_single_step(_make_llm_response(msg), tools=["ReadTool"])
+
+    agent_messages = [
+        e for e in events if isinstance(e, MessageEvent) and e.source == "agent"
+    ]
+    for event in agent_messages:
+        for part in event.llm_message.content:
+            if isinstance(part, TextContent):
+                assert _DSML not in part.text
+
+
+def test_unparseable_dsml_sends_a_corrective_nudge():
+    """Malformed DSML nudges the model instead of finishing the run."""
+    malformed = (
+        f"<{_DSML}tool_calls>\n"
+        f'<{_DSML}parameter name="path" string="true">x.ts</{_DSML}parameter>\n'
+        f"</{_DSML}tool_calls>"
+    )
+    msg = Message(role="assistant", content=[TextContent(text=malformed)])
+    events, convo = _run_single_step(_make_llm_response(msg), tools=["ReadTool"])
+    msg_events = [e for e in events if isinstance(e, MessageEvent)]
+
+    assert convo.state.execution_status != ConversationExecutionStatus.FINISHED
+    assert msg_events[-1].source == "environment"
+    assert msg_events[-1].llm_message.role == "user"
+
+
+def test_plain_content_still_finishes():
+    """Ordinary prose is untouched by DSML recovery."""
+    msg = Message(role="assistant", content=[TextContent(text="All done!")])
+    events, convo = _run_single_step(_make_llm_response(msg))
+
+    assert convo.state.execution_status == ConversationExecutionStatus.FINISHED
+
+
+# ---------------------------------------------------------------------------
+# finish_reason == "length"
+# ---------------------------------------------------------------------------
+
+
+def _make_truncated_response(message: Message) -> LLMResponse:
+    """A response the provider cut off at the output token limit."""
+    return LLMResponse(
+        message=message,
+        metrics=_make_metrics(),
+        raw_response=MagicMock(spec=ModelResponse, id="r1"),
+        truncated=True,
+    )
+
+
+def test_truncated_content_response_does_not_finish():
+    """A reply cut off at the token limit continues instead of finishing."""
+    msg = Message(role="assistant", content=[TextContent(text="Here is the first")])
+    events, convo = _run_single_step(_make_truncated_response(msg))
+    msg_events = [e for e in events if isinstance(e, MessageEvent)]
+
+    assert convo.state.execution_status != ConversationExecutionStatus.FINISHED
+    assert msg_events[-1].source == "environment"
+    nudge = msg_events[-1].llm_message.content[0]
+    assert isinstance(nudge, TextContent)
+    assert "cut off" in nudge.text
+
+
+def test_truncated_tool_call_response_still_executes():
+    """A truncated reply that did produce a valid tool call is not re-routed."""
+    tool_call = MessageToolCall(
+        id="tc-1",
+        name="finish",
+        arguments='{"message": "done"}',
+        origin="completion",
+    )
+    msg = Message(role="assistant", tool_calls=[tool_call])
+    events, _ = _run_single_step(_make_truncated_response(msg))
+    action_events = [e for e in events if isinstance(e, ActionEvent)]
+
+    assert len(action_events) == 1

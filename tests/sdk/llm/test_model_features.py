@@ -723,8 +723,14 @@ def test_prompt_cache_retention_support(model, expected_retention):
         # DeepSeek V4 Flash (dual-mode thinking)
         ("deepseek/deepseek-v4-flash", True),
         ("litellm_proxy/deepseek/deepseek-v4-flash", True),
+        # Router/provider prefixes that the fully-qualified entry would miss;
+        # the bare "deepseek-v4" family token must still match.
+        ("openhands/deepseek-v4-flash", True),
+        ("openai/deepseek-v4-flash", True),
+        ("openhands/deepseek-v4.1-flash", True),
         # Models that should NOT match
         ("deepseek/deepseek-chat", False),  # Different DeepSeek model
+        ("deepseek/deepseek-v3.2", False),  # Older, not dual-mode thinking
         ("kimi-k2-instruct", False),  # Different variant
         ("gpt-4o", False),
         ("claude-3-5-sonnet", False),
