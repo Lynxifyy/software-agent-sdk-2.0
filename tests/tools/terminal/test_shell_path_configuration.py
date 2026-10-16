@@ -94,16 +94,87 @@ def test_shell_path_validation_not_executable():
 def test_shell_path_auto_detection_failure():
     """Test that auto-detection failure raises clear error."""
     with tempfile.TemporaryDirectory() as temp_dir:
-        # Mock shutil.which to return None (bash not found)
+        # Mock shutil.which to return None (neither bash nor sh found)
         with patch("shutil.which", return_value=None):
             session = create_terminal_session(
                 work_dir=temp_dir,
                 terminal_type="subprocess",
             )
 
-            with pytest.raises(RuntimeError, match="Could not find bash in PATH"):
+            with pytest.raises(RuntimeError, match="Could not find bash"):
                 session.initialize()
 
+            session.close()
+
+
+def test_shell_path_env_variable_used():
+    """Test OPENHANDS_SHELL_PATH is used when no explicit shell_path is given.
+
+    This is the escape hatch for hosts where bash exists but is not on PATH,
+    e.g. Termux on Android.
+    """
+    bash_path = shutil.which("bash")
+    if not bash_path:
+        pytest.skip("bash not found in PATH")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        with patch.dict(os.environ, {"OPENHANDS_SHELL_PATH": bash_path}):
+            session = create_terminal_session(
+                work_dir=temp_dir,
+                terminal_type="subprocess",
+            )
+            session.initialize()
+
+            assert session.terminal.shell_path == bash_path
+            session.close()
+
+
+def test_shell_path_explicit_wins_over_env_variable():
+    """Test that an explicit shell_path beats OPENHANDS_SHELL_PATH."""
+    bash_path = shutil.which("bash")
+    if not bash_path:
+        pytest.skip("bash not found in PATH")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        with patch.dict(os.environ, {"OPENHANDS_SHELL_PATH": "/nonexistent/bash"}):
+            session = create_terminal_session(
+                work_dir=temp_dir,
+                terminal_type="subprocess",
+                shell_path=bash_path,
+            )
+            session.initialize()
+
+            assert session.terminal.shell_path == bash_path
+            session.close()
+
+
+def test_shell_path_falls_back_to_sh_when_bash_missing():
+    """Test the subprocess backend falls back to `sh` when bash is absent.
+
+    A minimal Unix host (e.g. stock Android) has no bash; the terminal should
+    still start with a POSIX shell rather than fail.
+    """
+    sh_path = shutil.which("sh")
+    if not sh_path:
+        pytest.skip("sh not found in PATH")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        real_which = shutil.which
+
+        def fake_which(name):
+            # Pretend bash is unavailable; let sh resolve normally.
+            if name == "bash":
+                return None
+            return real_which(name)
+
+        with patch("shutil.which", side_effect=fake_which):
+            session = create_terminal_session(
+                work_dir=temp_dir,
+                terminal_type="subprocess",
+            )
+            session.initialize()
+
+            assert session.terminal.shell_path == sh_path
             session.close()
 
 
