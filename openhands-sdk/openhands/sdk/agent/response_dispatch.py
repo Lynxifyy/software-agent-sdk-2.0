@@ -9,6 +9,7 @@ Contains:
 from __future__ import annotations
 
 import json
+import re
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
@@ -107,6 +108,103 @@ def classify_response(message: Message) -> LLMResponseType:
 
 
 # ---------------------------------------------------------------------------
+# Announced-action detection
+# ---------------------------------------------------------------------------
+
+# A text-only reply whose final sentence promises an action ("Let me check the
+# anchors output.") but carries no tool call is not a final answer: the model
+# stalled mid-plan. Treating it as final ends the run with the promise as the
+# last message, which is the "ending short" bug. The phrases below are the
+# openers models actually emit before a call; they are matched at the start of
+# the *last* sentence so ordinary prose that merely contains "Let me" earlier
+# is not misread as a stall.
+_ANNOUNCED_ACTION_PREFIXES = (
+    "let me",
+    "i'll",
+    "i will",
+    "now i",
+    "now let me",
+    "next",
+    "first",
+    "then",
+    "finally",
+    "let's",
+    "lets",
+    "i'm going to",
+    "i am going to",
+    "i need to",
+    "i'm now",
+    "i am now",
+)
+
+# An announcement that trails off with one of these is incomplete by
+# construction — the model meant to continue (usually with a tool call) and
+# stopped instead.
+_ANNOUNCED_ACTION_SUFFIXES = (":", "...", "\u2026")
+
+# Sentence boundary: end punctuation followed by whitespace, or a newline. The
+# whitespace requirement keeps decimals ("1.5") and abbreviations ("e.g.") from
+# splitting mid-token.
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?\u2026])\s+|\n+")
+
+# A nudge that produced no tool call may repeat; cap consecutive attempts so a
+# model that keeps announcing without acting cannot spin forever.
+MAX_CONSECUTIVE_ANNOUNCED_ACTION_NUDGES = 3
+ANNOUNCED_ACTION_NUDGE_COUNT_KEY = "announced_action_nudge_count"
+
+
+def last_sentence(text: str) -> str:
+    """Return the trailing sentence of ``text``, trimmed.
+
+    Falls back to the whole (trimmed) string when no boundary is found.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return ""
+    parts = [part.strip() for part in _SENTENCE_SPLIT_RE.split(stripped)]
+    for part in reversed(parts):
+        if part:
+            return part
+    return stripped
+
+
+def announces_action_without_tool_call(message: Message) -> bool:
+    """True when a text-only reply promises an action but makes no tool call.
+
+    A reply that already carries tool calls is never an announcement (the model
+    acted); the caller only reaches this for content-only responses, but the
+    guard keeps the helper safe to call anywhere.
+    """
+    if message.tool_calls:
+        return False
+    text = "\n".join(
+        part.text for part in message.content if isinstance(part, TextContent)
+    )
+    if not text.strip():
+        return False
+    candidate = last_sentence(text)
+    if not candidate:
+        return False
+    lowered = candidate.lower()
+    if lowered.endswith(_ANNOUNCED_ACTION_SUFFIXES):
+        return True
+    # Compare on the bare opener: strip a leading bullet/numbering the model may
+    # have added ("- Let me ...", "2. Now I ...").
+    bare = lowered.lstrip("-*\u2022 \t0123456789.)")
+    return bare.startswith(_ANNOUNCED_ACTION_PREFIXES)
+
+
+def _finish_reason(llm_response: LLMResponse) -> str | None:
+    """Best-effort read of the provider's finish reason for logging."""
+    raw = llm_response.raw_response
+    choices = getattr(raw, "choices", None)
+    if not choices:
+        return getattr(raw, "status", None)
+    reason = getattr(choices[0], "finish_reason", None)
+    return reason if reason is None else str(reason)
+
+
+# ---------------------------------------------------------------------------
 # Dispatch mixin
 # ---------------------------------------------------------------------------
 
@@ -189,6 +287,7 @@ class ResponseDispatchMixin:
         stream: StreamContext | None = None,
     ) -> None:
         """Handle LLM response containing tool calls."""
+        self._reset_announced_action(state)
         if not all(isinstance(c, TextContent) for c in message.content):
             logger.warning(
                 "LLM returned tool calls but message content is not all "
@@ -243,6 +342,7 @@ class ResponseDispatchMixin:
         tool call runs in its own thread and multiple calls are scheduled
         concurrently via :func:`asyncio.gather`.
         """
+        self._reset_announced_action(state)
         if not all(isinstance(c, TextContent) for c in message.content):
             logger.warning(
                 "LLM returned tool calls but message content is not all "
@@ -327,6 +427,9 @@ class ResponseDispatchMixin:
             mask_secrets=mask_secrets,
         )
         self._maybe_emit_vllm_tokens(llm_response, on_event)
+        if not llm_response.truncated and announces_action_without_tool_call(message):
+            self._handle_announced_action_stall(llm_response, state, on_event)
+            return
         logger.debug("LLM produced a message response - awaits user input")
         state.execution_status = ConversationExecutionStatus.FINISHED
 
@@ -368,8 +471,75 @@ class ResponseDispatchMixin:
             mask_secrets=mask_secrets,
         )
         self._maybe_emit_vllm_tokens(llm_response, on_event)
+        if not llm_response.truncated and announces_action_without_tool_call(message):
+            self._handle_announced_action_stall(llm_response, state, on_event)
+            return
         logger.debug("LLM produced a message response - awaits user input")
         state.execution_status = ConversationExecutionStatus.FINISHED
+
+    def _handle_announced_action_stall(
+        self,
+        llm_response: LLMResponse,
+        state: ConversationState,
+        on_event: ConversationCallbackType,
+    ) -> None:
+        """Nudge a model that announced an action but made no tool call.
+
+        The reply is already emitted; this decides whether the run continues.
+        Consecutive nudges are capped so a model that keeps promising without
+        acting cannot loop forever — past the cap the reply is accepted as the
+        final answer, which is the pre-existing behaviour. The counter resets
+        whenever a tool call actually runs (see ``_reset_announced_action``).
+        """
+        count = self._announced_action_nudge_count(state)
+        if count >= MAX_CONSECUTIVE_ANNOUNCED_ACTION_NUDGES:
+            logger.warning(
+                "LLM announced an action without a tool call %d times in a row "
+                "(finish_reason=%s) - accepting the reply as final",
+                count,
+                _finish_reason(llm_response),
+            )
+            state.execution_status = ConversationExecutionStatus.FINISHED
+            return
+
+        state.agent_state = {
+            **state.agent_state,
+            ANNOUNCED_ACTION_NUDGE_COUNT_KEY: count + 1,
+        }
+        usage = llm_response.metrics.accumulated_token_usage
+        logger.warning(
+            "LLM announced an action but made no tool call (attempt %d/%d, "
+            "finish_reason=%s, prompt_tokens=%s, completion_tokens=%s) - "
+            "requesting the tool call",
+            count + 1,
+            MAX_CONSECUTIVE_ANNOUNCED_ACTION_NUDGES,
+            _finish_reason(llm_response),
+            getattr(usage, "prompt_tokens", None),
+            getattr(usage, "completion_tokens", None),
+        )
+        self._send_corrective_nudge(
+            on_event,
+            text=(
+                "You said you would act but made no tool call. Make the tool "
+                "call now, or call finish if the task is complete."
+            ),
+        )
+
+    @staticmethod
+    def _announced_action_nudge_count(state: ConversationState) -> int:
+        """Consecutive announced-action nudges sent without an intervening call."""
+        value = state.agent_state.get(ANNOUNCED_ACTION_NUDGE_COUNT_KEY, 0)
+        return value if isinstance(value, int) and value > 0 else 0
+
+    @staticmethod
+    def _reset_announced_action(state: ConversationState) -> None:
+        """Clear the stall counter after a tool call actually runs."""
+        if ANNOUNCED_ACTION_NUDGE_COUNT_KEY in state.agent_state:
+            state.agent_state = {
+                key: value
+                for key, value in state.agent_state.items()
+                if key != ANNOUNCED_ACTION_NUDGE_COUNT_KEY
+            }
 
     def _handle_dsml_failure(
         self,
@@ -549,12 +719,16 @@ class ResponseDispatchMixin:
         The model still receives this as a user-role message, but the event
         source marks that it came from the framework rather than the human.
         ``text`` overrides the default message for specific failure modes
-        (unparseable DSML markup, output-limit truncation).
+        (unparseable DSML markup, output-limit truncation, an announced action
+        that was never made).
         """
-        logger.warning(
-            "LLM response contained no tool call and no content"
-            " - sending corrective feedback"
-        )
+        if text is None:
+            logger.warning(
+                "LLM response contained no tool call and no content"
+                " - sending corrective feedback"
+            )
+        else:
+            logger.warning("Sending corrective feedback: %s", text)
         nudge = MessageEvent(
             source="environment",
             llm_message=Message(

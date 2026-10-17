@@ -97,7 +97,10 @@ class ContentOnlyLLM(LLM):
 
         # Return content-only response - should finish conversation immediately
         message = Message(role="assistant")
-        message.content = [TextContent(text="I'm thinking about this...")]
+        # A genuine final answer, not an announced action: it neither opens with
+        # an action phrase nor trails off with ":" / "...", so the stall
+        # heuristic must leave it alone and the run must finish here.
+        message.content = [TextContent(text="The analysis is complete: 42.")]
         return LLMResponse(
             message=message,
             metrics=MetricsSnapshot(
@@ -131,7 +134,7 @@ def test_agent_finishes_after_content_only_response():
     ]
     assert len(msg_events) == 1
     assert any(
-        isinstance(c, TextContent) and c.text == "I'm thinking about this..."
+        isinstance(c, TextContent) and c.text == "The analysis is complete: 42."
         for c in msg_events[0].llm_message.content
     )
 

@@ -251,7 +251,12 @@ def test_content_response_does_not_inject_nudge():
     agent = _make_agent(with_tool=False)
     conv = Conversation(agent=agent)
 
-    resp = _model_response(content="Here is my analysis of the bug...")
+    # A genuine final answer. A reply that instead trails off with ":" / "..."
+    # or opens with an action phrase is treated as an announced action and does
+    # get a nudge, so this fixture must not look like one.
+    resp = _model_response(
+        content="Here is my analysis of the bug: it is in the parser."
+    )
 
     events: list[object] = []
     with patch("openhands.sdk.llm.llm.litellm_completion", return_value=resp):

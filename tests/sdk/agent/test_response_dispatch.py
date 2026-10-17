@@ -9,7 +9,13 @@ from litellm.types.utils import (
 )
 
 from openhands.sdk.agent import Agent
-from openhands.sdk.agent.response_dispatch import LLMResponseType, classify_response
+from openhands.sdk.agent.response_dispatch import (
+    ANNOUNCED_ACTION_NUDGE_COUNT_KEY,
+    MAX_CONSECUTIVE_ANNOUNCED_ACTION_NUDGES,
+    LLMResponseType,
+    announces_action_without_tool_call,
+    classify_response,
+)
 from openhands.sdk.conversation import Conversation, LocalConversation
 from openhands.sdk.conversation.state import ConversationExecutionStatus
 from openhands.sdk.conversation.stuck_detector import StuckDetector
@@ -274,6 +280,41 @@ def _run_single_step(
             conversation.state.append_event(e)
 
     agent.step(conversation, on_event=on_event)
+    return events, conversation
+
+
+async def _run_single_astep(
+    llm_response: LLMResponse,
+    *,
+    tools: list[str] | None = None,
+) -> tuple[list[Event], LocalConversation]:
+    """Run one agent async step with a canned LLM response."""
+    from pydantic import PrivateAttr
+
+    class SingleShotLLM(LLM):
+        _response: LLMResponse = PrivateAttr()
+
+        def __init__(self, response: LLMResponse):
+            super().__init__(model="test-model")
+            self._response = response
+
+        def completion(  # type: ignore[override]
+            self, *, messages, tools=None, **kwargs
+        ) -> LLMResponse:
+            return self._response
+
+        async def acompletion(  # type: ignore[override]
+            self, *, messages, tools=None, **kwargs
+        ) -> LLMResponse:
+            return self._response
+
+    llm = SingleShotLLM(llm_response)
+    agent = Agent(llm=llm, tools=[Tool(name=n) for n in (tools or [])])
+    conversation = Conversation(agent=agent)
+    conversation._ensure_agent_ready()
+
+    events: list[Event] = []
+    await agent.astep(conversation, on_event=events.append)
     return events, conversation
 
 
@@ -665,3 +706,127 @@ def test_truncated_tool_call_response_still_executes():
     action_events = [e for e in events if isinstance(e, ActionEvent)]
 
     assert len(action_events) == 1
+
+
+# ---------------------------------------------------------------------------
+# Announced action with no tool call ("ending short")
+# ---------------------------------------------------------------------------
+
+
+def test_announces_action_detects_promise_without_call():
+    """A trailing promise of an action is detected; a plain answer is not."""
+    assert announces_action_without_tool_call(
+        _msg(content=[TextContent(text="Let me check the anchors output.")])
+    )
+    assert announces_action_without_tool_call(
+        _msg(content=[TextContent(text="Now I'll run the tests:")])
+    )
+    assert announces_action_without_tool_call(
+        _msg(content=[TextContent(text="I'll inspect the file...")])
+    )
+    # A tool call means the model acted.
+    assert not announces_action_without_tool_call(
+        _msg(tool_calls=[_tool_call()], content=[TextContent(text="Let me run this.")])
+    )
+    # A completed answer must still finish.
+    assert not announces_action_without_tool_call(
+        _msg(content=[TextContent(text="The task is complete. All tests pass.")])
+    )
+    # "Let me" earlier in the message does not make the final answer a stall.
+    assert not announces_action_without_tool_call(
+        _msg(
+            content=[
+                TextContent(
+                    text="Let me explain. The anchors output shows 3 matches. Done."
+                )
+            ]
+        )
+    )
+
+
+def test_announced_action_stall_does_not_finish_and_nudges():
+    """The reported bug: a promise with no call must not end the run."""
+    msg = Message(
+        role="assistant", content=[TextContent(text="Let me check the anchors output.")]
+    )
+    events, convo = _run_single_step(_make_llm_response(msg))
+    msg_events = [e for e in events if isinstance(e, MessageEvent)]
+
+    assert convo.state.execution_status != ConversationExecutionStatus.FINISHED
+    # The reply is still emitted, then the corrective nudge.
+    assert msg_events[0].source == "agent"
+    assert msg_events[-1].source == "environment"
+    nudge = msg_events[-1].llm_message.content[0]
+    assert isinstance(nudge, TextContent)
+    assert "made no tool call" in nudge.text
+
+
+def test_announced_action_nudges_are_capped():
+    """Past the cap the reply is accepted as final rather than nudging forever."""
+    msg = Message(role="assistant", content=[TextContent(text="Let me check.")])
+    _, convo = _run_single_step(_make_llm_response(msg))
+    convo.state.agent_state = {
+        **convo.state.agent_state,
+        ANNOUNCED_ACTION_NUDGE_COUNT_KEY: MAX_CONSECUTIVE_ANNOUNCED_ACTION_NUDGES,
+    }
+
+    events: list[Event] = []
+    convo.agent.step(convo, on_event=events.append)
+    msg_events = [e for e in events if isinstance(e, MessageEvent)]
+
+    assert convo.state.execution_status == ConversationExecutionStatus.FINISHED
+    assert len(msg_events) == 1
+    assert msg_events[0].source == "agent"
+
+
+def test_tool_call_resets_announced_action_counter():
+    """A real tool call clears the stall counter so a later stall starts fresh."""
+    _, convo = _run_single_step(
+        _make_llm_response(Message(role="assistant", content=[TextContent(text="Hi.")]))
+    )
+    convo.state.agent_state = {
+        **convo.state.agent_state,
+        ANNOUNCED_ACTION_NUDGE_COUNT_KEY: 2,
+    }
+
+    tool_call = MessageToolCall(
+        id="tc-1", name="finish", arguments='{"message": "done"}', origin="completion"
+    )
+    tool_msg = Message(role="assistant", tool_calls=[tool_call])
+    convo.agent._handle_tool_calls(
+        tool_msg,
+        _make_llm_response(tool_msg),
+        convo,
+        convo.state,
+        lambda e: None,
+    )
+
+    assert ANNOUNCED_ACTION_NUDGE_COUNT_KEY not in convo.state.agent_state
+
+
+@pytest.mark.asyncio
+async def test_announced_action_stall_nudges_on_async_path():
+    """The async twin behaves the same as the sync path."""
+    msg = Message(
+        role="assistant", content=[TextContent(text="Let me check the anchors output.")]
+    )
+    events, convo = await _run_single_astep(_make_llm_response(msg))
+    msg_events = [e for e in events if isinstance(e, MessageEvent)]
+
+    assert convo.state.execution_status != ConversationExecutionStatus.FINISHED
+    assert msg_events[0].source == "agent"
+    assert msg_events[-1].source == "environment"
+    nudge = msg_events[-1].llm_message.content[0]
+    assert isinstance(nudge, TextContent)
+    assert "made no tool call" in nudge.text
+
+
+@pytest.mark.asyncio
+async def test_completed_answer_still_finishes_on_async_path():
+    """A genuine final answer on the async path still ends the run."""
+    msg = Message(role="assistant", content=[TextContent(text="The task is complete.")])
+    events, convo = await _run_single_astep(_make_llm_response(msg))
+    msg_events = [e for e in events if isinstance(e, MessageEvent)]
+
+    assert convo.state.execution_status == ConversationExecutionStatus.FINISHED
+    assert len(msg_events) == 1
