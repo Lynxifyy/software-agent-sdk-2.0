@@ -42,15 +42,30 @@ class CmdOutputMetadata(BaseModel):
     suffix: str = Field(default="", description="Suffix to add to command output")
 
     @classmethod
-    def to_ps1_prompt(cls) -> str:
-        """Convert the required metadata into a PS1 prompt."""
+    def to_ps1_prompt(cls, *, escape: bool = True) -> str:
+        """Convert the required metadata into a PS1 prompt.
+
+        Args:
+            escape: Escape the JSON double quotes. Required when the prompt is
+                assigned through a double-quoted ``export PS1="..."`` in
+                ``PROMPT_COMMAND`` (tmux), where bash strips the quotes. A shell
+                that keeps ``PS1`` literal — the PTY subprocess backend, and any
+                non-bash shell — must pass ``escape=False``, or the backslashes
+                are printed and the metadata stops being valid JSON.
+        """
         prompt = CMD_OUTPUT_PS1_BEGIN
         json_str = json.dumps(
             {
                 "pid": "$!",
                 "exit_code": "$?",
-                "username": r"\u",
-                "hostname": r"\h",
+                # ``\u``/``\h`` are bash-only PS1 escapes; on a POSIX sh they stay
+                # literal and ``\u`` is not even valid JSON, so the metadata stops
+                # parsing. Command/parameter expansion works in both shells.
+                "username": "${USER}",
+                # No single quotes: tmux assigns this prompt inside a
+                # single-quoted PROMPT_COMMAND, where a quote would end the
+                # assignment early.
+                "hostname": "$(hostname 2>/dev/null)",
                 "working_dir": r"$(pwd)",
                 "py_interpreter_path": r'$(command -v python || echo "")',
             },
@@ -58,7 +73,7 @@ class CmdOutputMetadata(BaseModel):
         )
         # Make sure we escape double quotes in the JSON string
         # So that PS1 will keep them as part of the output
-        prompt += json_str.replace('"', r"\"")
+        prompt += json_str.replace('"', r"\"") if escape else json_str
         prompt += CMD_OUTPUT_PS1_END + "\n"  # Ensure there's a newline at the end
         return prompt
 

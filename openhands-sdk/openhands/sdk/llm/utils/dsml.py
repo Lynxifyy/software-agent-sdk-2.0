@@ -16,6 +16,7 @@ value; ``string="false"`` marks a JSON value (number, boolean, array, object).
 
 import json
 import re
+import uuid
 from collections.abc import Sequence
 
 from openhands.sdk.llm.message import Message, MessageToolCall, TextContent
@@ -27,14 +28,22 @@ _DSML = re.escape(DSML_TOKEN)
 _TOOL_CALLS_BLOCK = re.compile(
     rf"<{_DSML}tool_calls>(.*?)</{_DSML}tool_calls>", re.DOTALL
 )
-_INVOKE = re.compile(
-    rf'<{_DSML}invoke\s+name="([^"]*)">(.*?)</{_DSML}invoke>', re.DOTALL
-)
+_INVOKE = re.compile(rf"<{_DSML}invoke\s+([^>]*?)>(.*?)</{_DSML}invoke>", re.DOTALL)
+# Attributes are parsed separately from the element body so a parameter is not
+# dropped when the model omits ``string`` or orders the attributes differently.
 _PARAMETER = re.compile(
-    rf'<{_DSML}parameter\s+name="([^"]*)"\s+string="(true|false)">'
-    rf"(.*?)</{_DSML}parameter>",
+    rf"<{_DSML}parameter\s+([^>]*?)>(.*?)</{_DSML}parameter>", re.DOTALL
+)
+_ATTRIBUTE = re.compile(r'([A-Za-z_][\w-]*)\s*=\s*"([^"]*)"')
+# An ``invoke``/``parameter`` element whose ``tool_calls`` wrapper is missing:
+# DeepSeek V4 Flash emits these intermittently, so the element is dropped whole
+# (value included) instead of leaving the raw value behind in the message text.
+_ORPHAN_ELEMENT = re.compile(
+    rf"<{_DSML}(?:invoke|parameter)\b[^>]*>.*?</{_DSML}(?:invoke|parameter)>",
     re.DOTALL,
 )
+# Any DSML tag left over, matched or not, so no markup reaches the user.
+_DSML_FRAGMENT = re.compile(rf"</?{_DSML}[^>]*>")
 
 
 class DsmlParseError(ValueError):
@@ -46,12 +55,39 @@ def contains_dsml(text: str) -> bool:
     return DSML_TOKEN in text
 
 
+def _strip_dsml(text: str) -> str:
+    """Remove DSML markup from ``text``.
+
+    Complete ``tool_calls`` blocks and orphaned ``invoke``/``parameter``
+    elements are dropped whole, then any remaining tag is removed. Without the
+    orphan pass a malformed block leaves its parameter *values* in the message,
+    and without the final pass unmatched closing tags survive.
+    """
+    text = _TOOL_CALLS_BLOCK.sub("", text)
+    text = _ORPHAN_ELEMENT.sub("", text)
+    return _DSML_FRAGMENT.sub("", text)
+
+
 def _parse_parameters(body: str) -> dict[str, object]:
     parameters: dict[str, object] = {}
     for match in _PARAMETER.finditer(body):
-        name, is_string, raw = match.group(1), match.group(2), match.group(3)
+        attributes = dict(_ATTRIBUTE.findall(match.group(1)))
+        name = attributes.get("name")
+        if not name:
+            continue
+        raw = match.group(2)
+        is_string = attributes.get("string")
         if is_string == "true":
             parameters[name] = raw
+            continue
+        if is_string is None:
+            # DeepSeek omits ``string`` on some calls. Assume a JSON value when
+            # it parses as one and fall back to the raw text, so the parameter
+            # is never dropped.
+            try:
+                parameters[name] = json.loads(raw)
+            except json.JSONDecodeError:
+                parameters[name] = raw
             continue
         try:
             parameters[name] = json.loads(raw)
@@ -65,7 +101,7 @@ def _parse_parameters(body: str) -> dict[str, object]:
 def parse_dsml_tool_calls(text: str) -> tuple[list[MessageToolCall], str]:
     """Parse DSML tool-call blocks out of ``text``.
 
-    Returns the recovered tool calls and ``text`` with the DSML blocks removed.
+    Returns the recovered tool calls and ``text`` with the DSML markup removed.
 
     Raises:
         DsmlParseError: A ``<tool_calls>`` block was found but contained no
@@ -78,18 +114,21 @@ def parse_dsml_tool_calls(text: str) -> tuple[list[MessageToolCall], str]:
         if not invokes:
             raise DsmlParseError("DSML tool_calls block without a valid invoke")
         for invoke in invokes:
-            name = invoke.group(1).strip()
+            name = dict(_ATTRIBUTE.findall(invoke.group(1))).get("name", "").strip()
             if not name:
                 raise DsmlParseError("DSML invoke without a tool name")
             calls.append(
                 MessageToolCall(
-                    id=f"dsml_{len(calls)}",
+                    # A fresh id per parse: the previous positional ``dsml_N``
+                    # scheme repeated across turns, and duplicate ids in history
+                    # break tool-result matching and are rejected by some APIs.
+                    id=f"dsml_{uuid.uuid4().hex}",
                     name=name,
                     arguments=json.dumps(_parse_parameters(invoke.group(2))),
                     origin="completion",
                 )
             )
-    return calls, _TOOL_CALLS_BLOCK.sub("", text)
+    return calls, _strip_dsml(text)
 
 
 def reconcile_dsml_message(message: Message) -> tuple[Message, bool]:
@@ -99,9 +138,6 @@ def reconcile_dsml_message(message: Message) -> tuple[Message, bool]:
     but unparseable, so the caller can nudge instead of treating the reply as
     the final answer.
     """
-    if message.tool_calls:
-        return message, False
-
     text = "".join(
         part.text for part in message.content if isinstance(part, TextContent)
     )
@@ -111,17 +147,24 @@ def reconcile_dsml_message(message: Message) -> tuple[Message, bool]:
     non_text: Sequence[object] = [
         part for part in message.content if not isinstance(part, TextContent)
     ]
+
+    if message.tool_calls:
+        # Real tool calls are already present, so nothing to recover — but the
+        # stray markup still has to go, or it reaches the user and the next
+        # request verbatim.
+        return _rebuild(message, non_text, _strip_dsml(text), message.tool_calls), False
+
     try:
         calls, cleaned = parse_dsml_tool_calls(text)
     except DsmlParseError:
-        # A malformed wrapper defeated the block regex; drop the visible text so
-        # raw markup never reaches the user as the final answer.
-        return _rebuild(message, non_text, "", tool_calls=None), True
+        # A malformed wrapper defeated the block regex; drop the visible markup
+        # so raw DSML never reaches the user as the final answer.
+        return _rebuild(message, non_text, _strip_dsml(text), None), True
 
     if not calls:
-        return _rebuild(message, non_text, cleaned, tool_calls=None), True
+        return _rebuild(message, non_text, cleaned, None), True
 
-    return _rebuild(message, non_text, cleaned, tool_calls=calls), False
+    return _rebuild(message, non_text, cleaned, calls), False
 
 
 def _rebuild(

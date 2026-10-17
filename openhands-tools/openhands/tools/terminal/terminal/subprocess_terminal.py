@@ -91,7 +91,9 @@ class SubprocessTerminal(TerminalInterface):
         env: Mapping[str, str] | None = None,
     ):
         super().__init__(work_dir, username)
-        self.PS1 = CmdOutputMetadata.to_ps1_prompt()
+        # ``escape=False``: this backend assigns PS1 literally, so the JSON must
+        # not carry the backslash escaping that ``PROMPT_COMMAND="..."`` needs.
+        self.PS1 = CmdOutputMetadata.to_ps1_prompt(escape=False)
         self.process = None
         self._pty_master_fd = None
         # Use a slightly larger buffer to match tmux behavior which seems to keep
@@ -143,7 +145,15 @@ class SubprocessTerminal(TerminalInterface):
 
         # Store the resolved shell path for later access
         self.shell_path = resolved_shell_path
-        logger.info(f"Using shell: {resolved_shell_path}")
+        # ``PROMPT_COMMAND`` is bash-only; a POSIX ``sh`` (dash, ash, Android's
+        # toybox sh) ignores it and then never redraws the metadata prompt, so
+        # every command would report exit_code -1 and lose its working dir.
+        self._is_bash = os.path.basename(resolved_shell_path).startswith("bash")
+        logger.info(
+            "Using shell: %s (%s prompt)",
+            resolved_shell_path,
+            "bash/PROMPT_COMMAND" if self._is_bash else "literal PS1",
+        )
 
         # Inherit environment variables from the parent process
         env = build_terminal_env(self._env)
@@ -194,15 +204,21 @@ class SubprocessTerminal(TerminalInterface):
         self.reader_thread.start()
         self._initialized: bool = True
 
-        # Configure the shell: disable history expansion (bash only; ignored
-        # elsewhere), set up PS1/PS2 prompts. `set +H` is a no-op on sh via the
-        # fallback shell, so guard it rather than let it print an error.
-        init_cmd = (
-            f'set +H 2>/dev/null; '
-            f'export PROMPT_COMMAND=\'export PS1="{self.PS1}"\'; export PS2=""'
-        ).encode("utf-8", "ignore")
-
-        self._write_pty(init_cmd + ENTER)
+        # Configure the shell. bash redraws PS1 from PROMPT_COMMAND before every
+        # prompt, which is what keeps ``$?``/``$!`` fresh — and the assignment is
+        # double-quoted there, so bash needs the escaped prompt. POSIX sh has no
+        # such hook, but it re-expands the exported PS1 on every prompt, which is
+        # enough; its PS1 is assigned single-quoted and must stay literal.
+        # ``set +H`` is bash-only and would print an error on sh.
+        if self._is_bash:
+            escaped = CmdOutputMetadata.to_ps1_prompt(escape=True)
+            init_cmd = (
+                f"set +H; export PROMPT_COMMAND='export PS1=\"{escaped}\"'; "
+                f'export PS2=""'
+            )
+        else:
+            init_cmd = f"export PS1='{self.PS1}'; export PS2=\"\""
+        self._write_pty(init_cmd.encode("utf-8", "ignore") + ENTER)
         time.sleep(1.0)  # Wait for command to take effect
 
         self.clear_screen()

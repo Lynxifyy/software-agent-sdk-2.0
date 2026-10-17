@@ -11,7 +11,10 @@ from typing import Annotated
 import pytest
 from pydantic import Field, ValidationError
 
-from openhands.sdk.agent.utils import fix_malformed_tool_arguments
+from openhands.sdk.agent.utils import (
+    drop_benign_extra_arguments,
+    fix_malformed_tool_arguments,
+)
 from openhands.sdk.tool.schema import Action
 
 
@@ -383,3 +386,48 @@ def test_str_or_list_field_list_passthrough():
     action = StrOrListAction.model_validate(fixed_data)
 
     assert action.value == ["a", "b", "c"]
+
+
+class TerminalLikeAction(Action):
+    """Mirrors TerminalAction: only ``command`` is accepted."""
+
+    command: str = Field(description="The shell command to execute")
+
+
+def test_drop_benign_extra_arguments_removes_description():
+    """DeepSeek adds ``description`` to terminal calls out of habit."""
+    arguments = {"command": "ls -la", "description": "List the working directory"}
+
+    cleaned = drop_benign_extra_arguments(arguments, TerminalLikeAction)
+
+    assert cleaned == {"command": "ls -la"}
+    # The action now validates, instead of failing on the extra input.
+    assert TerminalLikeAction.model_validate(cleaned).command == "ls -la"
+
+
+def test_drop_benign_extra_arguments_keeps_unknown_non_benign_keys():
+    """An unknown key that is not a known habit must still surface as an error."""
+    arguments = {"command": "ls", "wibble": 1}
+
+    cleaned = drop_benign_extra_arguments(arguments, TerminalLikeAction)
+
+    assert cleaned == {"command": "ls", "wibble": 1}
+    with pytest.raises(ValidationError):
+        TerminalLikeAction.model_validate(cleaned)
+
+
+def test_drop_benign_extra_arguments_keeps_declared_description():
+    """A tool that genuinely declares ``description`` keeps the value."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "command": {"type": "string"},
+            "description": {"type": "string"},
+        },
+    }
+
+    cleaned = drop_benign_extra_arguments(
+        {"command": "ls", "description": "keep"}, schema
+    )
+
+    assert cleaned == {"command": "ls", "description": "keep"}

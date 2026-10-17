@@ -15,6 +15,7 @@ if platform.system() == "Windows":
         allow_module_level=True,
     )
 
+from openhands.tools.terminal.definition import TerminalAction
 from openhands.tools.terminal.terminal import SubprocessTerminal
 from openhands.tools.terminal.terminal.factory import create_terminal_session
 
@@ -198,6 +199,36 @@ def test_shell_path_with_tmux_terminal():
             if "Tmux is not available" in str(e):
                 pytest.skip("Tmux not available on this system")
             raise
+
+
+def test_sh_fallback_reports_real_exit_code_and_working_dir():
+    """A POSIX sh (no bash) must still yield correct exit code and cwd.
+
+    ``PROMPT_COMMAND`` is bash-only, so the sh path assigns a literal PS1 with
+    shell-agnostic expansions. Without that, every command reported exit_code
+    -1 and lost its working directory — the "broken terminal" on hosts like
+    stock Android.
+    """
+    sh_path = shutil.which("sh")
+    if not sh_path:
+        pytest.skip("sh not found in PATH")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        session = create_terminal_session(
+            work_dir=temp_dir,
+            terminal_type="subprocess",
+            shell_path=sh_path,
+        )
+        session.initialize()
+
+        ok = session.execute(TerminalAction(command="echo HELLO_SH"))
+        assert ok.exit_code == 0
+        assert "HELLO_SH" in ok.text
+
+        bad = session.execute(TerminalAction(command="false"))
+        assert bad.exit_code == 1
+
+        session.close()
 
 
 def test_shell_path_reset_preserves_config():

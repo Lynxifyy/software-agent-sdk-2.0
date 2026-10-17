@@ -420,3 +420,42 @@ def test_chat_options_omits_openrouter_headers_when_unset():
     llm = DummyLLM(model="gpt-4o")
     out = select_chat_options(llm, user_kwargs={}, has_tools=False)
     assert "extra_headers" not in out
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "deepseek/deepseek-v4-flash",
+        "openhands/deepseek-v4-flash",
+        "openai/deepseek-v4.1-flash",
+    ],
+)
+def test_deepseek_v4_reasoning_effort_none_disables_thinking(model):
+    """``reasoning_effort='none'`` reaches DeepSeek as a native thinking toggle.
+
+    LiteLLM only translates this for a route it recognizes as DeepSeek, so the
+    SDK sends ``thinking`` itself — including for prefixed model strings.
+    """
+    llm = DummyLLM(model=model, reasoning_effort="none")
+    out = select_chat_options(llm, user_kwargs={}, has_tools=True)
+
+    assert out["thinking"] == {"type": "disabled"}
+    # The raw OpenAI-style param must not also be sent; DeepSeek rejects it.
+    assert "reasoning_effort" not in out
+
+
+def test_deepseek_v4_non_none_reasoning_effort_enables_thinking():
+    llm = DummyLLM(model="deepseek/deepseek-v4-flash", reasoning_effort="high")
+    out = select_chat_options(llm, user_kwargs={}, has_tools=True)
+
+    assert out["thinking"] == {"type": "enabled"}
+    assert "reasoning_effort" not in out
+
+
+def test_non_deepseek_model_keeps_reasoning_effort():
+    """The DeepSeek toggle must not leak onto other providers."""
+    llm = DummyLLM(model="gpt-5.5", reasoning_effort="none")
+    out = select_chat_options(llm, user_kwargs={}, has_tools=True)
+
+    assert "thinking" not in out
+    assert out["reasoning_effort"] == "none"

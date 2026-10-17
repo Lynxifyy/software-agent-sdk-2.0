@@ -11,10 +11,19 @@ from openhands.sdk.llm.options.common import (
     apply_extra_body,
     apply_extra_headers,
 )
+from openhands.sdk.llm.utils.model_features import model_matches
 
 
 if TYPE_CHECKING:
     from openhands.sdk.llm.call_context import LLMCallContext
+
+
+# DeepSeek V4/V4.1 dual-mode (Thinking / Non-Thinking) models take a
+# request-level ``thinking`` toggle. Matched on the bare token so prefixed model
+# strings (``openhands/...``, ``openai/...`` on a custom base URL) are covered —
+# LiteLLM only translates ``reasoning_effort`` for a route it recognizes as
+# DeepSeek, so the SDK sends the toggle itself.
+DEEPSEEK_THINKING_MODELS: list[str] = ["deepseek-v4"]
 
 
 def select_chat_options(
@@ -60,6 +69,18 @@ def select_chat_options(
         out.pop("temperature", None)
         out.pop("top_p", None)
         out.pop("top_k", None)
+
+    # DeepSeek V4/V4.1 dual-mode models: forward the reasoning_effort toggle as
+    # DeepSeek's native ``thinking`` parameter. LiteLLM only performs this
+    # translation when it recognizes the route as DeepSeek, so a prefixed model
+    # string (``openhands/deepseek-v4-flash``, custom base URL) would silently
+    # drop it and leave thinking on. Sending it here keeps `none` authoritative.
+    if model_matches(model_name, DEEPSEEK_THINKING_MODELS):
+        out.pop("reasoning_effort", None)
+        if llm.reasoning_effort is not None:
+            out["thinking"] = {
+                "type": "disabled" if llm.reasoning_effort == "none" else "enabled"
+            }
 
     if model_features.thinking_mode == "manual":
         if llm.extended_thinking_budget and max_output_tokens:

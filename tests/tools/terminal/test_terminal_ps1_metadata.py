@@ -393,3 +393,37 @@ def test_issue_2416_missing_ps1_metadata_graceful_fallback():
     assert obs.exit_code == -1
     assert "139 passed" in obs.text
     assert "PS1 metadata" in obs.metadata.suffix
+
+
+def test_ps1_prompt_literal_mode_is_valid_json():
+    """``escape=False`` must emit JSON that parses as-is.
+
+    The subprocess backend assigns PS1 literally (no ``export PS1="..."``), so
+    the prompt must not carry backslash-escaped quotes — a POSIX sh prints them
+    verbatim and the metadata stops being valid JSON.
+    """
+    prompt = CmdOutputMetadata.to_ps1_prompt(escape=False)
+
+    assert prompt.startswith("\n###PS1JSON###\n")
+    # The JSON must parse without any unescaping pass.
+    json_str = prompt.split("###PS1JSON###\n", 1)[1].split("\n###PS1END###", 1)[0]
+    assert set(json.loads(json_str)) == {
+        "pid",
+        "exit_code",
+        "username",
+        "hostname",
+        "working_dir",
+        "py_interpreter_path",
+    }
+
+
+def test_ps1_prompt_uses_shell_agnostic_expansions():
+    """The prompt must not use bash-only PS1 escapes.
+
+    ``\\u`` and ``\\h`` are not expanded by a POSIX sh and leave invalid JSON.
+    """
+    prompt = CmdOutputMetadata.to_ps1_prompt(escape=False)
+
+    assert r"\u" not in prompt
+    assert r"\h" not in prompt
+    assert "${USER}" in prompt

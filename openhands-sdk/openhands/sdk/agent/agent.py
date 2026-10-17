@@ -18,10 +18,12 @@ from openhands.sdk.agent.response_dispatch import (
     LLMResponseType,
     ResponseDispatchMixin,
     classify_response,
+    has_only_complete_tool_calls,
 )
 from openhands.sdk.agent.stream_context import StreamContext
 from openhands.sdk.agent.utils import (
     aprepare_llm_messages,
+    drop_benign_extra_arguments,
     fix_malformed_tool_arguments,
     normalize_tool_call,
     parse_tool_call_arguments,
@@ -875,10 +877,11 @@ class Agent(CriticMixin, ResponseDispatchMixin, AgentBase):
         message: Message = llm_response.message
         response_type = classify_response(message)
 
-        # A reply cut off at the output token limit is not a final answer: a
-        # half-written tool call surfaces as a JSON parse error, and a truncated
-        # message ends the run prematurely. Retry by asking the model to continue.
-        if llm_response.truncated and response_type is not LLMResponseType.TOOL_CALLS:
+        # A reply cut off at the output token limit is not a final answer: the
+        # text stops mid-sentence, and a half-written tool call would run with
+        # incomplete arguments. Retry by asking the model to continue. A tool
+        # call that survived the cut-off intact still runs normally.
+        if llm_response.truncated and not has_only_complete_tool_calls(message):
             self._handle_truncated_response(
                 message, llm_response, conversation, state, on_event, stream
             )
@@ -1110,8 +1113,10 @@ class Agent(CriticMixin, ResponseDispatchMixin, AgentBase):
                 if sources == state.secret_registry.secret_sources:
                     break
 
-        # Mirror step(): a length-truncated reply is not a final answer.
-        if llm_response.truncated and response_type is not LLMResponseType.TOOL_CALLS:
+        # Mirror step(): a length-truncated reply is not a final answer unless it
+        # carries an intact tool call, and a half-written tool call must not run
+        # with incomplete arguments.
+        if llm_response.truncated and not has_only_complete_tool_calls(message):
             self._handle_truncated_response(
                 message,
                 llm_response,
@@ -1420,6 +1425,10 @@ class Agent(CriticMixin, ResponseDispatchMixin, AgentBase):
                 return
 
             arguments = fix_malformed_tool_arguments(arguments, tool.action_type)
+            # Drop habit-added keys (e.g. DeepSeek's "description" on a terminal
+            # call) before validation, so an unknown-but-harmless argument does
+            # not fail the call and cost a turn.
+            arguments = drop_benign_extra_arguments(arguments, tool.action_type)
             if tool.response_schema is not None:
                 arguments = fix_malformed_tool_arguments(
                     arguments, tool.response_schema

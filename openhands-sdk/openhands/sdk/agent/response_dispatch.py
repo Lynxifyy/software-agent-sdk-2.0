@@ -8,6 +8,7 @@ Contains:
 
 from __future__ import annotations
 
+import json
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
@@ -41,6 +42,32 @@ logger = get_logger(__name__)
 # ---------------------------------------------------------------------------
 # Classification
 # ---------------------------------------------------------------------------
+
+
+def is_complete_tool_call(tool_call: MessageToolCall) -> bool:
+    """Return True when ``tool_call``'s arguments are complete JSON.
+
+    A reply cut off at the output token limit can still contain a whole tool
+    call (the truncation happened in the prose before or after it). Only calls
+    whose arguments are valid JSON are safe to run; a half-written call would
+    either fail validation or act on truncated input.
+    """
+    arguments = tool_call.arguments
+    if not arguments or not arguments.strip():
+        # A no-argument call serializes to an empty object; an empty string is
+        # also treated as complete by ``parse_tool_call_arguments``.
+        return True
+    try:
+        json.loads(arguments)
+    except (json.JSONDecodeError, ValueError):
+        return False
+    return True
+
+
+def has_only_complete_tool_calls(message: Message) -> bool:
+    """True when ``message`` carries tool calls and every one is complete."""
+    calls = message.tool_calls
+    return bool(calls) and all(is_complete_tool_call(call) for call in calls)
 
 
 class LLMResponseType(StrEnum):
@@ -388,12 +415,20 @@ class ResponseDispatchMixin:
 
         Treating a length-truncated reply as final silently ends the run with a
         half-written answer; instead the partial reply is emitted and the model
-        is nudged to continue.
+        is nudged to continue. Only *incomplete* tool calls are dropped: their
+        arguments are truncated, so running them would fail (or, worse, act on
+        truncated input), and storing an unexecuted call confuses the history. A
+        tool call that survived the cut-off intact is left in place for the
+        caller to run.
         """
         logger.warning(
             "LLM response was truncated at the output token limit - "
             "requesting continuation"
         )
+        if message.tool_calls and not all(
+            is_complete_tool_call(call) for call in message.tool_calls
+        ):
+            message = message.model_copy(update={"tool_calls": None})
         self._emit_message_event(
             message,
             llm_response,

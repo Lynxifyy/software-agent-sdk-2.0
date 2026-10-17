@@ -153,3 +153,72 @@ def test_reconcile_noop_when_tool_calls_present():
 
     assert unparsed is False
     assert reconciled is message
+
+
+def test_reconcile_strips_stray_markup_when_tool_calls_present():
+    """A real call plus leftover markup keeps the call but loses the markup."""
+    from openhands.sdk.llm import MessageToolCall
+
+    message = Message(
+        role="assistant",
+        content=[
+            TextContent(
+                text="running "
+                + _tool_calls_block(
+                    _invoke("bash", _param("command", "ls", string=True))
+                )
+            )
+        ],
+        tool_calls=[
+            MessageToolCall(id="tc1", name="bash", arguments="{}", origin="completion")
+        ],
+    )
+
+    reconciled, unparsed = reconcile_dsml_message(message)
+
+    assert unparsed is False
+    assert reconciled.tool_calls == message.tool_calls
+    visible = "".join(p.text for p in reconciled.content if isinstance(p, TextContent))
+    assert DSML_TOKEN not in visible
+    assert "running" in visible
+
+
+def test_parse_tolerates_invoke_attributes_and_omitted_string():
+    """Extra invoke attributes and a missing ``string`` must not drop a param."""
+    text = _tool_calls_block(
+        f'<{DSML_TOKEN}invoke name="terminal" extra="x">'
+        + f'<{DSML_TOKEN}parameter name="command">ls -la</{DSML_TOKEN}parameter>'
+        + f'<{DSML_TOKEN}parameter name="timeout">30</{DSML_TOKEN}parameter>'
+        + f"</{DSML_TOKEN}invoke>"
+    )
+
+    calls, cleaned = parse_dsml_tool_calls(text)
+
+    assert len(calls) == 1
+    assert calls[0].name == "terminal"
+    # ``ls -la`` is not valid JSON, so it stays text; ``30`` parses as a number.
+    assert json.loads(calls[0].arguments) == {"command": "ls -la", "timeout": 30}
+    assert cleaned.strip() == ""
+
+
+def test_strip_removes_orphan_parameter_values():
+    """An unwrapped parameter must be dropped whole, not left as loose text."""
+    message = Message(
+        role="assistant",
+        content=[
+            TextContent(
+                text=(
+                    "done\n"
+                    + _param("path", "src/lib/gateway.ts", string=True)
+                    + f"</{DSML_TOKEN}tool_calls>"
+                )
+            )
+        ],
+    )
+
+    reconciled, unparsed = reconcile_dsml_message(message)
+
+    assert unparsed is True
+    visible = "".join(p.text for p in reconciled.content if isinstance(p, TextContent))
+    assert DSML_TOKEN not in visible
+    assert "gateway.ts" not in visible

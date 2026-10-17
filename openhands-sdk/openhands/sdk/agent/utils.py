@@ -240,6 +240,37 @@ def fix_malformed_tool_arguments(
     return fixed_arguments
 
 
+# Keys that models habitually add to tool calls out of habit from other coding
+# tools (DeepSeek's terminal call is the common one). They carry no meaning for
+# an SDK action, and because actions reject unknown fields the call would fail
+# validation and burn a turn on the retry.
+_BENIGN_EXTRA_ARGS: frozenset[str] = frozenset({"description"})
+
+
+def drop_benign_extra_arguments(
+    arguments: dict[str, Any], action_type: type[BaseModel] | dict[str, Any]
+) -> dict[str, Any]:
+    """Drop known-harmless unknown arguments before validating a tool call.
+
+    Only keys in ``_BENIGN_EXTRA_ARGS`` that the action does not define are
+    removed. Anything else is left in place so a genuinely wrong argument still
+    surfaces as a validation error instead of being silently discarded.
+    """
+    if not isinstance(arguments, dict):
+        return arguments
+
+    if isinstance(action_type, dict):
+        allowed = set(action_type.get("properties", {}))
+    else:
+        allowed = set(action_type.model_fields)
+
+    return {
+        key: value
+        for key, value in arguments.items()
+        if key in allowed or key not in _BENIGN_EXTRA_ARGS
+    }
+
+
 TOOL_NAME_ALIASES: dict[str, str] = {
     "bash": "terminal",
     "command": "terminal",
