@@ -72,6 +72,12 @@ class LLMResponse(BaseModel):
         if isinstance(resp, ModelResponse):
             return bool(resp.choices) and resp.choices[0].finish_reason == "length"
         if isinstance(resp, ResponsesAPIResponse):
-            return resp.status == "incomplete" and resp.incomplete_details is not None
+            # Read defensively: `isinstance` is satisfied by stand-ins (e.g.
+            # spec'd mocks) that do not carry every field, and a missing
+            # attribute must not turn a normal reply into an exception.
+            status = getattr(resp, "status", None)
+            return status == "incomplete" and (
+                getattr(resp, "incomplete_details", None) is not None
+            )
         # Tolerate stand-ins (e.g. spec'd mocks) that model neither shape.
         return False

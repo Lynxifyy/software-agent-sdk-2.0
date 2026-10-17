@@ -54,6 +54,19 @@ def test_responses_completed_is_not_truncated():
     assert LLMResponse.is_truncated_response(_responses("completed")) is False
 
 
+def test_responses_stand_in_without_status_is_not_truncated():
+    """A spec'd stand-in that omits ``status`` must not raise.
+
+    ``isinstance`` matches anything shaped like a ``ResponsesAPIResponse``, so a
+    stand-in missing the field has to read as "not truncated" rather than
+    turning an ordinary reply into an ``AttributeError``.
+    """
+    resp = MagicMock(spec=ResponsesAPIResponse)
+    del resp.status
+
+    assert LLMResponse.is_truncated_response(resp) is False
+
+
 def test_truncated_defaults_to_false():
     """Existing construction sites keep working without the new flag."""
     response = LLMResponse(
