@@ -20,12 +20,14 @@ def test_default_exec_names_match_tool_classes() -> None:
     from openhands.tools.file_editor import FileEditorTool
     from openhands.tools.task_tracker import TaskTrackerTool
     from openhands.tools.terminal import TerminalTool
+    from openhands.tools.verify import VerifyTool
 
     assert DEFAULT_EXEC_TOOL_NAMES == (
         TerminalTool.name,
         FileEditorTool.name,
         TaskTrackerTool.name,
         DiscordTool.name,
+        VerifyTool.name,
     )
 
 

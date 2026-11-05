@@ -24,11 +24,13 @@ def register_default_tools(enable_browser: bool = True) -> None:
     from openhands.tools.file_editor import FileEditorTool
     from openhands.tools.task_tracker import TaskTrackerTool
     from openhands.tools.terminal import TerminalTool
+    from openhands.tools.verify import VerifyTool
 
     logger.debug(f"Tool: {TerminalTool.name} registered.")
     logger.debug(f"Tool: {FileEditorTool.name} registered.")
     logger.debug(f"Tool: {TaskTrackerTool.name} registered.")
     logger.debug(f"Tool: {DiscordTool.name} registered.")
+    logger.debug(f"Tool: {VerifyTool.name} registered.")
 
     if enable_browser:
         from openhands.tools.browser_use import BrowserToolSet
@@ -54,12 +56,14 @@ def get_default_tools(
     from openhands.tools.file_editor import FileEditorTool
     from openhands.tools.task_tracker import TaskTrackerTool
     from openhands.tools.terminal import TerminalTool
+    from openhands.tools.verify import VerifyTool
 
     tools = [
         Tool(name=TerminalTool.name),
         Tool(name=FileEditorTool.name),
         Tool(name=TaskTrackerTool.name),
         Tool(name=DiscordTool.name),
+        Tool(name=VerifyTool.name),
     ]
     if enable_browser:
         from openhands.tools.browser_use import BrowserToolSet

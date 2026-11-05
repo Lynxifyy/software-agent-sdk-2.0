@@ -12,6 +12,7 @@
       { "name": "file_editor", "params": {} },
       { "name": "task_tracker", "params": {} },
       { "name": "discord", "params": {} },
+      { "name": "verify", "params": {} },
       { "name": "browser_tool_set", "params": {} },
       { "name": "task_tool_set", "params": {} }
     ]

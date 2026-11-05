@@ -1063,6 +1063,7 @@ def test_create_agent_defaults_tools_when_none() -> None:
         "file_editor",
         "task_tracker",
         "discord",
+        "verify",
     ]
     assert "SwitchLLMTool" in agent.include_default_tools
 
@@ -1077,6 +1078,7 @@ def test_retired_enable_sub_agents_folds_into_the_default_tools() -> None:
         "file_editor",
         "task_tracker",
         "discord",
+        "verify",
         "task_tool_set",
     ]
 
@@ -1098,7 +1100,7 @@ def test_retired_switches_pin_the_browser_only_for_loaded_settings(
         {**payload, "schema_version": AGENT_SETTINGS_SCHEMA_VERSION}
     )
 
-    standard = ["terminal", "file_editor", "task_tracker", "discord"]
+    standard = ["terminal", "file_editor", "task_tracker", "discord", "verify"]
     assert [t.name for t in built.tools or []] == [*standard, *expected]
     for settings in (loaded, stored):
         assert isinstance(settings, OpenHandsAgentSettings)
@@ -1247,7 +1249,14 @@ def test_sparse_retired_switch_diff_changes_only_what_it_names(
     [
         (
             {"enable_switch_llm_tool": False},
-            ["terminal", "file_editor", "task_tracker", "discord", "browser_tool_set"],
+            [
+                "terminal",
+                "file_editor",
+                "task_tracker",
+                "discord",
+                "verify",
+                "browser_tool_set",
+            ],
         ),
         (
             {"enable_sub_agents": True},
@@ -1256,6 +1265,7 @@ def test_sparse_retired_switch_diff_changes_only_what_it_names(
                 "file_editor",
                 "task_tracker",
                 "discord",
+                "verify",
                 "browser_tool_set",
                 "task_tool_set",
                 "switch_llm",
@@ -1363,6 +1373,7 @@ def test_v6_settings_pin_the_standard_set_the_server_launches() -> None:
         "file_editor",
         "task_tracker",
         "discord",
+        "verify",
         "browser_tool_set",
         "task_tool_set",
         "switch_llm",
@@ -1374,6 +1385,7 @@ _PINNED_WITH_SUB_AGENTS = [
     "file_editor",
     "task_tracker",
     "discord",
+    "verify",
     "browser_tool_set",
     "task_tool_set",
     "switch_llm",
@@ -1392,7 +1404,14 @@ _PINNED_WITH_SUB_AGENTS = [
         ),
         (
             {"enable_switch_llm_tool": False},
-            ["terminal", "file_editor", "task_tracker", "discord", "browser_tool_set"],
+            [
+                "terminal",
+                "file_editor",
+                "task_tracker",
+                "discord",
+                "verify",
+                "browser_tool_set",
+            ],
         ),
     ],
 )
