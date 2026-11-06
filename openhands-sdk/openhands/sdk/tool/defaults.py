@@ -28,8 +28,16 @@ DEFAULT_EXEC_TOOL_NAMES: tuple[str, ...] = (
     "terminal",
     "file_editor",
     "task_tracker",
+    "discord",
+    "verify",
 )
-"""Names of the standard exec tools every default OpenHands agent gets."""
+"""Names of the standard exec tools every default OpenHands agent gets.
+
+``discord`` and ``verify`` are FreeHands additions: ``discord`` lets the agent
+act on a Discord server over the REST API once the bot is connected, and
+``verify`` runs a project's build/test command so the agent can confirm a change
+works before reporting it done.
+"""
 
 BROWSER_TOOL_NAME = "browser_tool_set"
 """Name of the browser tool set, added only when ``enable_browser`` is set."""
