@@ -16,6 +16,7 @@ from openhands.sdk.tool.defaults import (
 
 
 def test_default_exec_names_match_tool_classes() -> None:
+    from openhands.tools.cloud_terminal import CloudTerminalTool
     from openhands.tools.discord import DiscordTool
     from openhands.tools.file_editor import FileEditorTool
     from openhands.tools.task_tracker import TaskTrackerTool
@@ -26,6 +27,7 @@ def test_default_exec_names_match_tool_classes() -> None:
         TerminalTool.name,
         FileEditorTool.name,
         TaskTrackerTool.name,
+        CloudTerminalTool.name,
         DiscordTool.name,
         VerifyTool.name,
     )

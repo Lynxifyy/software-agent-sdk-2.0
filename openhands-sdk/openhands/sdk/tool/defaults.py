@@ -28,15 +28,18 @@ DEFAULT_EXEC_TOOL_NAMES: tuple[str, ...] = (
     "terminal",
     "file_editor",
     "task_tracker",
+    "cloud_terminal",
     "discord",
     "verify",
 )
 """Names of the standard exec tools every default OpenHands agent gets.
 
-``discord`` and ``verify`` are FreeHands additions: ``discord`` lets the agent
-act on a Discord server over the REST API once the bot is connected, and
-``verify`` runs a project's build/test command so the agent can confirm a change
-works before reporting it done.
+``cloud_terminal``, ``discord`` and ``verify`` are FreeHands additions:
+``cloud_terminal`` runs one command through the conversation's (cloud) workspace
+with a structured result so a DeepSeek-driven agent can test an app in the cloud
+terminal, ``discord`` lets the agent act on a Discord server over the REST API
+once the bot is connected, and ``verify`` runs a project's build/test command so
+the agent can confirm a change works before reporting it done.
 """
 
 BROWSER_TOOL_NAME = "browser_tool_set"
