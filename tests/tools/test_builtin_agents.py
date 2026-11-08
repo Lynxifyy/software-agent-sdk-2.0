@@ -36,9 +36,13 @@ def _make_test_llm() -> LLM:
 
 def test_builtins_contains_expected_agents() -> None:
     md_files = {f.stem for f in SUBAGENTS_DIR.glob("*.md")}
-    assert {"default", "code_explorer", "bash_runner", "web_researcher"}.issubset(
-        md_files
-    )
+    assert {
+        "default",
+        "code_explorer",
+        "bash_runner",
+        "web_researcher",
+        "oli",
+    }.issubset(md_files)
 
 
 def test_load_all_builtins() -> None:
@@ -50,6 +54,7 @@ def test_load_all_builtins() -> None:
         "code-explorer",
         "bash-runner",
         "web-researcher",
+        "oli",
     }.issubset(names)
 
 
@@ -58,11 +63,17 @@ def test_load_all_builtins() -> None:
     [
         (
             True,
-            ["general-purpose", "code-explorer", "bash-runner", "web-researcher"],
+            [
+                "general-purpose",
+                "code-explorer",
+                "bash-runner",
+                "web-researcher",
+                "oli",
+            ],
         ),
         (
             False,
-            ["general-purpose", "code-explorer", "bash-runner"],
+            ["general-purpose", "code-explorer", "bash-runner", "oli"],
         ),
     ],
 )
