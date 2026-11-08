@@ -21,6 +21,10 @@
     "params": {}
    },
    {
+    "name": "file_builder",
+    "params": {}
+   },
+   {
     "name": "cloud_terminal",
     "params": {}
    },
