@@ -102,8 +102,34 @@ def test_register_builtins_agents_registers_expected_factories(
     assert agent_tool_names["code-explorer"] == ["terminal"]
     assert agent_tool_names["bash-runner"] == ["terminal"]
 
+    # Oli is the flagship coding agent: it carries the advanced tool set
+    # (search, patch, artifacts, verification) and adds browser research only
+    # when the browser is available.
+    oli_tools = agent_tool_names["oli"]
+    assert oli_tools == [
+        "terminal",
+        "file_editor",
+        "apply_patch",
+        "grep",
+        "glob",
+        "task_tracker",
+        "file_builder",
+        "cloud_terminal",
+        "verify",
+        *(["browser_tool_set"] if enable_browser else []),
+    ]
+
     if enable_browser:
         assert "browser_tool_set" in agent_tool_names["web-researcher"]
+
+
+def test_oli_keeps_advanced_tools_without_browser() -> None:
+    """Oli still loads (minus browser research) when the browser is unavailable."""
+    register_builtins_agents(enable_browser=False)
+    agent = get_agent_factory("oli").factory_func(_make_test_llm())
+    tool_names = [t.name for t in agent.tools]
+    assert "browser_tool_set" not in tool_names
+    assert {"apply_patch", "grep", "glob", "verify"} <= set(tool_names)
 
 
 def test_general_purpose_has_no_browser_tools() -> None:

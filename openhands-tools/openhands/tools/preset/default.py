@@ -124,11 +124,35 @@ def get_default_agent(
     return agent
 
 
+_BROWSER_TOOL_NAME = "browser_tool_set"
+_BROWSER_ONLY_AGENTS = {"web-researcher"}
+
+# Tool modules referenced by builtin agent definitions but not part of the
+# default exec set. Importing each module triggers its auto-registration so the
+# agent factory can resolve the tool name at spawn time.
+_BUILTIN_AGENT_TOOL_MODULES = (
+    "openhands.tools.grep",
+    "openhands.tools.glob",
+    "openhands.tools.apply_patch",
+)
+
+
+def _register_builtin_agent_tools(enable_browser: bool) -> None:
+    """Register the tools builtin agents reference beyond the default set."""
+    import importlib
+
+    for module in _BUILTIN_AGENT_TOOL_MODULES:
+        importlib.import_module(module)
+    if enable_browser:
+        importlib.import_module("openhands.tools.browser_use")
+
+
 def discover_builtin_agents(enable_browser: bool = True) -> list[AgentDefinition]:
     """Load builtin agent definitions (``level='builtin'``) without registering them.
 
     Non-mutating counterpart to ``register_builtins_agents``. Browser-only agents
-    are skipped when ``enable_browser`` is False.
+    are skipped when ``enable_browser`` is False, and the browser tool is dropped
+    from agents that use it as an enhancement (Oli) so they still load.
 
     Args:
         enable_browser: When False, skip agents needing browser tools (web researcher).
@@ -139,14 +163,21 @@ def discover_builtin_agents(enable_browser: bool = True) -> list[AgentDefinition
     subagent_dir = Path(__file__).parent / "subagents"
     builtins_agents_def = load_agents_from_dir(subagent_dir)
 
-    # Filter out browser-dependent agents when browser is not available
     if not enable_browser:
-        _browser_only_agents = {"web-researcher"}
-        builtins_agents_def = [
-            agent
-            for agent in builtins_agents_def
-            if agent.name not in _browser_only_agents
-        ]
+        filtered: list[AgentDefinition] = []
+        for agent in builtins_agents_def:
+            if agent.name in _BROWSER_ONLY_AGENTS:
+                continue
+            if _BROWSER_TOOL_NAME in agent.tools:
+                agent = agent.model_copy(
+                    update={
+                        "tools": [
+                            name for name in agent.tools if name != _BROWSER_TOOL_NAME
+                        ]
+                    }
+                )
+            filtered.append(agent)
+        builtins_agents_def = filtered
 
     return [
         agent_def.model_copy(update={"level": "builtin"})
@@ -167,6 +198,7 @@ def register_builtins_agents(enable_browser: bool = True) -> list[str]:
         List of agents which were actually registered.
     """
     register_default_tools(enable_browser=enable_browser)
+    _register_builtin_agent_tools(enable_browser=enable_browser)
 
     builtins_agents_def = discover_builtin_agents(enable_browser=enable_browser)
 
